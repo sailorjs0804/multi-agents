@@ -8,9 +8,6 @@ from app.exceptions import ToolError
 class ToolCollection:
     """A collection of defined tools."""
 
-    class Config:
-        arbitrary_types_allowed = True
-
     def __init__(self, *tools: BaseTool):
         self.tools = tools
         self.tool_map = {tool.name: tool for tool in tools}

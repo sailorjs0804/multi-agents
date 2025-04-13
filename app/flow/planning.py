@@ -1,6 +1,7 @@
+import os  # 添加导入os模块
 import json
 import time
-from enum import Enum
+import asyncio  # 添加导入
 from typing import Dict, List, Union, Optional
 
 from pydantic import Field
@@ -8,38 +9,9 @@ from pydantic import Field
 from app.llm import LLM
 from app.tool import PlanningTool
 from app.logger import logger
-from app.schema import Message, AgentState, ToolChoice
+from app.schema import Message, AgentState
 from app.flow.base import BaseFlow
 from app.agent.base import BaseAgent
-
-
-class PlanStepStatus(str, Enum):
-    """Enum class defining possible statuses of a plan step"""
-
-    NOT_STARTED = "not_started"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    BLOCKED = "blocked"
-
-    @classmethod
-    def get_all_statuses(cls) -> list[str]:
-        """Return a list of all possible step status values"""
-        return [status.value for status in cls]
-
-    @classmethod
-    def get_active_statuses(cls) -> list[str]:
-        """Return a list of values representing active statuses (not started or in progress)"""
-        return [cls.NOT_STARTED.value, cls.IN_PROGRESS.value]
-
-    @classmethod
-    def get_status_marks(cls) -> Dict[str, str]:
-        """Return a mapping of statuses to their marker symbols"""
-        return {
-            cls.COMPLETED.value: "[✓]",
-            cls.IN_PROGRESS.value: "[→]",
-            cls.BLOCKED.value: "[!]",
-            cls.NOT_STARTED.value: "[ ]",
-        }
 
 
 class PlanningFlow(BaseFlow):
@@ -91,7 +63,9 @@ class PlanningFlow(BaseFlow):
         # Fallback to primary agent
         return self.primary_agent
 
-    async def execute(self, input_text: str) -> str:
+    async def execute(
+        self, input_text: str, job_id: str = None, cancel_event: asyncio.Event = None
+    ) -> str:
         """Execute the planning flow with agents."""
         try:
             if not self.primary_agent:
@@ -99,7 +73,7 @@ class PlanningFlow(BaseFlow):
 
             # Create initial plan if input provided
             if input_text:
-                await self._create_initial_plan(input_text)
+                await self._create_initial_plan(input_text, job_id)
 
                 # Verify plan was created successfully
                 if self.active_plan_id not in self.planning_tool.plans:
@@ -110,6 +84,11 @@ class PlanningFlow(BaseFlow):
 
             result = ""
             while True:
+                # 检查是否被要求取消执行
+                if cancel_event and cancel_event.is_set():
+                    logger.warning("Execution cancelled by user")
+                    return result + "\n执行已被用户取消"
+
                 # Get current step to execute
                 self.current_step_index, step_info = await self._get_current_step_info()
 
@@ -133,10 +112,24 @@ class PlanningFlow(BaseFlow):
             logger.error(f"Error in PlanningFlow: {str(e)}")
             return f"Execution failed: {str(e)}"
 
-    async def _create_initial_plan(self, request: str) -> None:
+    async def _create_initial_plan(self, request: str, job_id: str = None) -> None:
         """Create an initial plan based on the request using the flow's LLM and PlanningTool."""
+        # 如果提供了job_id，则使用它；否则生成一个基于请求的job_id
+        if not job_id:
+            job_id = f"job_{request[:8].replace(' ', '_')}"
+            if len(job_id) < 10:  # 如果太短，加上时间戳
+                job_id = f"job_{int(time.time())}"
+
+        log_file_path = f"logs/{job_id}.log"
+        os.environ["OPENMANUS_TASK_ID"] = job_id
+        os.environ["OPENMANUS_LOG_FILE"] = log_file_path
+
+        # 设置日志文件名为job_id
+        logger.add(log_file_path, rotation="100 MB")
+
         logger.info(f"Creating initial plan with ID: {self.active_plan_id}")
 
+        # 原有代码继续执行
         # Create a system message for plan creation
         system_message = Message.system_message(
             "You are a planning assistant. Create a concise, actionable plan with clear steps. "
@@ -154,7 +147,7 @@ class PlanningFlow(BaseFlow):
             messages=[user_message],
             system_msgs=[system_message],
             tools=[self.planning_tool.to_param()],
-            tool_choice=ToolChoice.AUTO,
+            tool_choice="required",
         )
 
         # Process tool calls if present
@@ -213,11 +206,11 @@ class PlanningFlow(BaseFlow):
             # Find first non-completed step
             for i, step in enumerate(steps):
                 if i >= len(step_statuses):
-                    status = PlanStepStatus.NOT_STARTED.value
+                    status = "not_started"
                 else:
                     status = step_statuses[i]
 
-                if status in PlanStepStatus.get_active_statuses():
+                if status in ["not_started", "in_progress"]:
                     # Extract step type/category if available
                     step_info = {"text": step}
 
@@ -234,17 +227,17 @@ class PlanningFlow(BaseFlow):
                             command="mark_step",
                             plan_id=self.active_plan_id,
                             step_index=i,
-                            step_status=PlanStepStatus.IN_PROGRESS.value,
+                            step_status="in_progress",
                         )
                     except Exception as e:
                         logger.warning(f"Error marking step as in_progress: {e}")
                         # Update step status directly if needed
                         if i < len(step_statuses):
-                            step_statuses[i] = PlanStepStatus.IN_PROGRESS.value
+                            step_statuses[i] = "in_progress"
                         else:
                             while len(step_statuses) < i:
-                                step_statuses.append(PlanStepStatus.NOT_STARTED.value)
-                            step_statuses.append(PlanStepStatus.IN_PROGRESS.value)
+                                step_statuses.append("not_started")
+                            step_statuses.append("in_progress")
 
                         plan_data["step_statuses"] = step_statuses
 
@@ -296,11 +289,12 @@ class PlanningFlow(BaseFlow):
                 command="mark_step",
                 plan_id=self.active_plan_id,
                 step_index=self.current_step_index,
-                step_status=PlanStepStatus.COMPLETED.value,
+                step_status="completed",
             )
             logger.info(
                 f"Marked step {self.current_step_index} as completed in plan {self.active_plan_id}"
             )
+            # ThinkingTracker.add_thinking_step(self.active_plan_id, f"Completed step {self.current_step_index}")
         except Exception as e:
             logger.warning(f"Failed to update plan status: {e}")
             # Update step status directly in planning tool storage
@@ -310,10 +304,10 @@ class PlanningFlow(BaseFlow):
 
                 # Ensure the step_statuses list is long enough
                 while len(step_statuses) <= self.current_step_index:
-                    step_statuses.append(PlanStepStatus.NOT_STARTED.value)
+                    step_statuses.append("not_started")
 
                 # Update the status
-                step_statuses[self.current_step_index] = PlanStepStatus.COMPLETED.value
+                step_statuses[self.current_step_index] = "completed"
                 plan_data["step_statuses"] = step_statuses
 
     async def _get_plan_text(self) -> str:
@@ -341,18 +335,23 @@ class PlanningFlow(BaseFlow):
 
             # Ensure step_statuses and step_notes match the number of steps
             while len(step_statuses) < len(steps):
-                step_statuses.append(PlanStepStatus.NOT_STARTED.value)
+                step_statuses.append("not_started")
             while len(step_notes) < len(steps):
                 step_notes.append("")
 
             # Count steps by status
-            status_counts = {status: 0 for status in PlanStepStatus.get_all_statuses()}
+            status_counts = {
+                "completed": 0,
+                "in_progress": 0,
+                "blocked": 0,
+                "not_started": 0,
+            }
 
             for status in step_statuses:
                 if status in status_counts:
                     status_counts[status] += 1
 
-            completed = status_counts[PlanStepStatus.COMPLETED.value]
+            completed = status_counts["completed"]
             total = len(steps)
             progress = (completed / total) * 100 if total > 0 else 0
 
@@ -362,19 +361,21 @@ class PlanningFlow(BaseFlow):
             plan_text += (
                 f"Progress: {completed}/{total} steps completed ({progress:.1f}%)\n"
             )
-            plan_text += f"Status: {status_counts[PlanStepStatus.COMPLETED.value]} completed, {status_counts[PlanStepStatus.IN_PROGRESS.value]} in progress, "
-            plan_text += f"{status_counts[PlanStepStatus.BLOCKED.value]} blocked, {status_counts[PlanStepStatus.NOT_STARTED.value]} not started\n\n"
+            plan_text += f"Status: {status_counts['completed']} completed, {status_counts['in_progress']} in progress, "
+            plan_text += f"{status_counts['blocked']} blocked, {status_counts['not_started']} not started\n\n"
             plan_text += "Steps:\n"
-
-            status_marks = PlanStepStatus.get_status_marks()
 
             for i, (step, status, notes) in enumerate(
                 zip(steps, step_statuses, step_notes)
             ):
-                # Use status marks to indicate step status
-                status_mark = status_marks.get(
-                    status, status_marks[PlanStepStatus.NOT_STARTED.value]
-                )
+                if status == "completed":
+                    status_mark = "[✓]"
+                elif status == "in_progress":
+                    status_mark = "[→]"
+                elif status == "blocked":
+                    status_mark = "[!]"
+                else:  # not_started
+                    status_mark = "[ ]"
 
                 plan_text += f"{i}. {status_mark} {step}\n"
                 if notes:

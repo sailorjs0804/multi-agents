@@ -2,7 +2,7 @@ import os
 import asyncio
 from typing import Optional
 
-from app.tool.base import BaseTool, CLIResult
+from app.tool.base import BaseTool, CLIResult, ToolResult
 from app.exceptions import ToolError
 
 _BASH_DESCRIPTION = """Execute a bash command in the terminal.
@@ -56,7 +56,7 @@ class _BashSession:
         if not self._started:
             raise ToolError("Session has not started.")
         if self._process.returncode is not None:
-            return CLIResult(
+            return ToolResult(
                 system="tool must be restarted",
                 error=f"bash has exited with returncode {self._process.returncode}",
             )
@@ -139,7 +139,7 @@ class Bash(BaseTool):
             self._session = _BashSession()
             await self._session.start()
 
-            return CLIResult(system="tool has been restarted.")
+            return ToolResult(system="tool has been restarted.")
 
         if self._session is None:
             self._session = _BashSession()
