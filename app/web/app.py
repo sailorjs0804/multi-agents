@@ -32,7 +32,7 @@ from app.flow.flow_factory import FlowFactory
 from app.web.thinking_tracker import ThinkingTracker
 
 # 控制是否自动打开浏览器 (读取环境变量，默认为True)
-AUTO_OPEN_BROWSER = os.environ.get("AUTO_OPEN_BROWSER", "1") == "1"
+AUTO_OPEN_BROWSER = False
 last_opened = False  # 跟踪浏览器是否已打开
 
 app = FastAPI(title="OpenManus Web")

@@ -1,8 +1,26 @@
 import time
 import asyncio
+from pathlib import Path
+
+import uvicorn
 
 from app.logger import logger
 from app.agent.manus import Manus
+
+
+def ensure_directories():
+    # 创建templates目录
+    templates_dir = Path("app/web/templates")
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建static目录
+    static_dir = Path("app/web/static")
+    static_dir.mkdir(parents=True, exist_ok=True)
+
+    # 确保__init__.py文件存在
+    init_file = Path("app/web/__init__.py")
+    if not init_file.exists():
+        init_file.touch()
 
 
 async def main():
@@ -18,17 +36,11 @@ async def main():
         logger.info("Request processing completed.")
     except KeyboardInterrupt:
         logger.warning("Operation interrupted.")
-    finally:
-        # Ensure agent resources are cleaned up before exiting
-        await agent.cleanup()
 
 
 if __name__ == "__main__":
-    # asyncio.run(main())
     s_time = time.time()
-    # prompt = "help me plan a trip to Japan"
-    prompt = "Tell me a interesting story"
-    agent = Manus()
-    asyncio.run(agent.run(prompt))
-    e_time = time.time()
-    logger.info(f"Request processed in {e_time - s_time:.2f} seconds")
+    prompt = "help me plan a trip to Japan"
+    # agent = Manus()
+    # asyncio.run(agent.run(prompt))
+    uvicorn.run("app.web.app:app", host="0.0.0.0", port=9000, reload=True)
